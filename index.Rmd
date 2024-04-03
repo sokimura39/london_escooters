@@ -1,0 +1,578 @@
+---
+title: "London E-scooter analysis"
+author: "Soki Kimura"
+date: "2023-12-15"
+output: 
+  html_document:
+    theme: cosmo
+    highlight: monochrome
+---
+
+This report was created for the final assignment for the [Geographic Information Systems and Science module](https://andrewmaclachlan.github.io/CASA0005repo/) led by Dr. Andy MacLachlan at the Centre for Advanced Spatial Analysis as part of the MSc Urban Spatial Science module. 
+
+The original report starts below:
+
+-----
+
+### Introduction
+
+In this report, I will identify whether there are any patterns in accidents involving e-scooters in the Greater London Area. The questions that will be addressed in this report will be: 
+
+Are there any areas that have a higher rate of e-scooter accidents compared to the average in London, when taking into account the traffic? 
+
+I assume that the more e-scooters that run through the area, there will be more accidents that they are involved in. After confirming this, I will seek to find areas with higher density of e-scooter accidents in comparison with the traffic volume of e-scooters.
+
+### The datasets
+
+The datasets used are as follows:
+
+#### Road Safety Data
+
+- Casualties
+- Collisions
+- E-scooters
+
+This dataset is provided by the Department for Transport, and includes the spatial distribution and its characteristics for the United Kingdom. The characteristics include the road type, speed limit, number and type of vehicles involved, casualties, and other data involving the time and situation of the data.
+
+#### Traffic data
+
+- active travel counts data
+
+The active travel counts data is collected at 2,297 points across the Greater London area every 15 minutes. This includes the data for e-scooters, allowing our analysis on the traffic possible. We will analyse the average number of e-scooters in an area in order to standardise the number of accidents.
+
+#### Spatial Data
+
+- London Wards
+
+This will be the basis of our analysis.
+
+### The process of data cleaning
+
+The data-process will be as follows.
+
+#### Road Safety Data
+
+For road safety data:
+
+- the road safety dataset include the location, time, severeness, casualties, and type of vehicles that are involved
+- the accident location are stored in the collision data, but vehicles are stored in different dataset so must be joined for analysis
+- the accident data which involoves e-scooters will be extracted for analysis
+- the scope year will be 2022; the most recent data available, and will illustrate the "usual" characteristics of London with minimal effects from COVID-19
+- the dataset include the whole of the UK, so the data within the Greater London Area will be the ones that will be used
+
+#### Active Travel Counts data
+
+The active travel data has a separate file for the locations and the actual values. I will:
+
+- convert the csv file for locations into spatial data using the eastings and northings
+- merge the data with the counts (which are separated by central, inner and outer zones)
+- calculate the average number of e-scooters by point of data collection
+- calculate the average number of e-scooters per point by borough, and standardise by the borough area
+
+#### Joining data and analysis
+
+After the data cleaning is complete, the data is combined by borough to conduct the analysis.
+
+- I will use the ratio of the number of accidents per square km as our objective statistics 
+- When comparing with the e-scooter traffic, we will consider whether there are any relationship between the traffic volume and number of accidents
+- The accidents are summarised for the whole period of scope, and the average number of traffic is calculated for a 15-minute period (hereinafter "accident-traffic ratio").
+
+The spatial boundaries that I will use are the London boroughs. Smaller statistical areas may be able to catch the characteristics of specific areas, but the traffic count data has only 2,297 points, which is not enough to have valid data for all 625 wards.
+
+The spatial distribution will be calculated using the following models:
+
+- The relationship between traffic and the number of accidents is checked through a simple linear regression.
+- Consider if there is a spatial autocorrelation of the accident-traffic ratio using the Global Moran's I index. The Global Moran's I will indicate whether there is a spatial autocorrelation, where positive values indicate spatial clustering, and negative values otherwise.
+- The local Moran's I will be calculated to determine whether there are areas that have significantly higher or lower frequency of accidents compared to its neighbours.
+
+## Reading Data
+
+### Loading libraries
+
+First of all, the required libraries need to be loaded.
+
+```{r libraries, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(sf)
+library(ggspatial)
+library(spdep)
+library(broom)
+library(tmap)
+library(here)
+library(janitor)
+
+```
+
+Here, I will read in all of the necessary data.
+The road safety data, geometry data for London, and the active travel counts are loaded.
+
+The active travel counts are separated into zones, so they are combined together at this stage to enable easier data wrangling in the future.
+
+```{r read_data, message=FALSE, warning=FALSE}
+
+# read in casualties
+casualty <- read_csv(
+  here::here("data", "road_safety", "dft-road-casualty-statistics-casualty-2022.csv")
+)
+
+# read in collisions
+collision <- read_csv(
+  here::here("data", "road_safety", "dft-road-casualty-statistics-collision-2022.csv")
+)
+
+# read in e-scooter data
+e_scooter <- read_csv(
+  here::here("data", "road_safety", 
+             "dft-road-casualty-statistics-vehicle-e-scooter-2020-Latest-Published-Year.csv"))
+
+
+# read in London LSOA shapefiles
+# transform into EPSG:27700 again to make able to join, 
+# even though it is already in EPSG:27700
+
+
+ward <- st_read(
+  here::here("data", "statistical-gis-boundaries-london",
+             "statistical-gis-boundaries-london","ESRI", 
+             "London_Ward_CityMerged.shp")
+) %>%
+  st_transform(., 27700)
+
+borough <- st_read(
+  here::here("data", "statistical-gis-boundaries-london",
+             "statistical-gis-boundaries-london","ESRI", 
+             "London_Borough_Excluding_MHW.shp")
+) %>%
+  st_transform(., 27700)
+
+# read in active travel counts data
+# clean the name of columns
+count_points <- read_csv(here::here("data", "active_travel_counts", "0-Count locations.csv")) %>%
+  janitor::clean_names(.)
+
+# read in the data for active travel counts
+
+# central area
+count_central <- read_csv(here::here("data", "active_travel_counts", "2022-Central.csv")) %>%
+  janitor::clean_names(.)
+
+# inner area (separated into 2)
+count_inner1 <- read_csv(here::here("data", "active_travel_counts", "2022-Inner-Part1.csv")) %>%
+  janitor::clean_names(.)
+
+count_inner2 <- read_csv(here::here("data", "active_travel_counts", "2022-Inner-Part2.csv")) %>%
+  janitor::clean_names(.)
+
+# outer area
+count_outer <- read_csv(here::here("data", "active_travel_counts", "2022-Outer.csv")) %>%
+  janitor::clean_names(.)
+
+# combine all data together
+count_all <- bind_rows(count_central, count_inner1, count_inner2, count_outer)
+
+```
+
+## Transforming Data
+
+Next, the csv data for collisions and active travel count data that has been read in will be transformed into spatial data.
+The data that has invalid location data is dropped, since it is difficult to consider the spatial characteristics in the following analysis.
+
+```{r make_spatial_data}
+
+# transform the collisions into spatial data
+collision_sf <- collision %>%
+  drop_na(., c("location_easting_osgr", "location_northing_osgr")) %>%
+  st_as_sf(., coords = c("location_easting_osgr", "location_northing_osgr"), crs = 27700)
+
+# transform the active travel counts into spatial data
+count_points_sf <- count_points %>%
+  drop_na(., c("easting_uk_grid", "northing_uk_grid")) %>%
+  st_as_sf(., coords = c("easting_uk_grid", "northing_uk_grid"), crs = 27700)
+
+```
+
+## Wrangling Data
+
+### Accident data
+
+The dataset for Road Safety includes the whole of London, therefore we will only use the spatial subset for the Greater London area.
+This will be combined with an inner join, to extract only the accident data involving e-scooters. 
+The e-scooter accidents dataset includes data outside of London as well as data from previous years, so an inner join will extract the e-scooter accidents in London that happened in 2022.
+
+```{r filter_and_join_data}
+
+# filter the collision data
+
+# make spatial subset of dataset
+collision_sf <- collision_sf[borough, ]
+
+# join with e-scooter data, to get all collisions involving e-scooters
+e_scooter_london <- collision_sf %>%
+  inner_join(., e_scooter, by = c("accident_index" = "accident_index"))
+
+```
+
+Next, I will join the data with the polygons to look at the number of accidents that occur in each statistical area. Accidents are to be standardised by area for a fair comparison between areas.
+
+```{r join_with_spatial_data}
+
+# join the number of accidents to borough
+borough_accidents <- borough %>%
+  mutate(accidents = lengths(st_intersects(., e_scooter_london)))
+
+# join the number of accidents to ward
+ward_accidents <- ward %>%
+  mutate(accidents = lengths(st_intersects(., e_scooter_london)))
+
+
+# standardise using the area
+borough_accidents <- borough_accidents %>%
+  mutate(accidents_per_km2 = accidents / HECTARES * 100)
+
+# ward_accidents <- ward_accidents %>%
+#   mutate(accidents_per_km2 = accidents / HECTARES * 100)
+
+```
+
+The spatial distribution of collisions is shown below.
+
+```{r view_collision_points}
+
+ggplot() +
+  
+  # draw wards
+  geom_sf(
+    data = borough_accidents,
+    color = NA,
+    aes(fill = accidents_per_km2)
+  ) +
+  
+  # e-scooter data
+  geom_sf(
+    data = e_scooter_london,
+    color = alpha("white", 0.5),
+    size = 0.5
+  ) +
+  
+  # add north arrow
+  annotation_north_arrow(
+    location = "tr",
+    style = north_arrow_fancy_orienteering(
+      text_col = NA
+    )
+  )
+  
+```
+
+A spatial clustering can be observed in the centre of London, but the number of e-scooters are expected to be higher as well, so cannot immediately conclude there is significant danger in these areas.
+
+### Active travel count data
+
+For the active travel counts, the data will be filtered by e-scooters.
+They will then be summarised by the points to get the average traffic for each counting point.
+This will then be summarised by borough, to find the average traffic of e-scooters within the borough.
+
+```{r}
+
+# filter by e-scooters, and then summarise by the counting point
+count_summarise <- count_all %>%
+  filter(mode == "E-scooters") %>%
+  group_by(unq_id) %>%
+  summarise(counts = mean(count))
+
+# join the data to the spatial data
+count_points_sf <- count_points_sf %>%
+  left_join(., count_summarise, by = c("site_id" = "unq_id")) %>%
+  # drop na values for counts
+  drop_na(., "counts")
+
+
+# summarise average traffic by ward
+# dropping the geometry for ease of join later
+count_by_ward <- count_points_sf %>%
+  st_join(., ward_accidents) %>%
+  st_drop_geometry(.) %>%
+  group_by(GSS_CODE) %>%
+  summarise(average_count = mean(counts))
+
+# join back to ward
+ward_accidents <- ward_accidents %>%
+  left_join(., count_by_ward, by = c("GSS_CODE" = "GSS_CODE"))
+
+# summarise average traffic by borough
+# dropping the geometry for ease of join later
+count_by_borough <- count_points_sf %>%
+  st_join(., borough_accidents) %>%
+  st_drop_geometry(.) %>%
+  group_by(GSS_CODE) %>%
+  summarise(average_count = mean(counts))
+
+# join back to borough
+borough_accidents <- borough_accidents %>%
+  left_join(., count_by_borough, by = c("GSS_CODE" = "GSS_CODE"))
+
+  
+```
+
+Now, the dataset has the number of accidents per square km that occurred in 2022 and the average number of e-scooters per 15 minutes.
+
+## Preparing Data for Analysis
+
+The statistical value we seek to use is the accident-traffic ratio, and this is calculated here.
+
+```{r calculating_average}
+
+# calculate the ratio of accidents to traffic
+borough_accident_ratio <- borough_accidents %>%
+  mutate(ratio = accidents_per_km2 / average_count)
+
+# ward_accident_ratio <- ward_accidents %>%
+#   mutate(ratio = accidents_per_km2 / average_count)
+
+```
+
+
+## Analysis
+
+### Considering the relationship between accidents and traffic
+
+First, we will consider if there is a correlation between the number of e-scooters and the accidents that involve them.
+
+```{r scatter_plot_accidents, message=FALSE, warning=FALSE}
+# draw a scatter plot of average counts and accidents
+ggplot(
+  data = borough_accidents,
+  aes(x = average_count, y = accidents_per_km2)
+) +
+  # plot the points
+  geom_point() +
+  
+  # draw the regression line
+  geom_smooth(method= "lm") +
+  
+  # set theme
+  theme_classic()
+```
+
+The regression model is described as follows:
+
+```{r regression_model}
+
+lm_ratio <- lm(borough_accidents$accidents_per_km2 ~ borough_accidents$average_count)
+summary(lm_ratio)
+
+```
+
+We see a highly correlation between the traffic and the number of accidents that occur in an area. This has an adjusted R-squared value of 0.745, which indicates that 74.5% of the difference can be explained through this variable.
+
+### Spatial Autocorrelation
+
+Now we will observe whether the spatial aspects play a role in the number of accidents that occur in the Greater London area.
+
+#### Spatial Distribution of Values
+
+The following is a map showing the accident-traffic ratio per borough.
+
+```{r plot_ratio, message=FALSE, warning=FALSE}
+
+# set mode to interactive
+tmap_mode("view")
+
+# add shape
+tm_shape(borough_accident_ratio) +
+  # add fill
+  tm_fill("ratio", title = "Accidents-Traffic Ratio") +
+  # add title
+  tm_layout(title = "Ratio of Accidents per km2 to the E-scooter Traffic")
+  
+
+# ggplot() +
+#   geom_sf(
+#     data = borough_accident_ratio,
+#     aes(fill = ratio),
+#     color = NA
+#   ) +
+#   
+#   # set scale to remove outlier
+#   scale_fill_distiller(
+#     palette = "Oranges"
+#   )
+
+```
+
+The map shows there are several boroughs with a high ratio of accidents compared to the traffic volume of e-scooters. The London Boroughs of Lambeth and Islington show the highest ratio of accidents involving e-scooters when standardised with the traffic. 
+The difference indicates there may be spatial factors that impact the number of accidents.
+
+#### Spatial Autocorrelation Indeces
+
+Now, I will identify whether the number of accidents has a spatial autocorrelation, or it has complete spatial randomness.
+
+The Global Moran's I will indicate whether there is a spatial autocorrelation. This ranges from -1 to 1, a figure closer to 1 showing spatial clustering, while a negative number shows values dispersed.
+The Local Moran's I will indicate whether each value is significantly higher or lower compared to the neighbouring values.
+
+##### Defining Neighbours
+
+For this analysis, we need to define neighbouring areas. 
+The possible definitions are:
+
+- Queen's case: any areas having a common edge or corner will be considered as neighbouring
+- K nearest neighbours: the nearest k neighbours are considered as neighbours
+
+The result for the Queen's case is shown below.
+
+```{r queens_case}
+
+queens_nb <- borough_accident_ratio %>%
+  poly2nb(., queen = TRUE)
+
+plot(queens_nb, st_geometry(borough_accident_ratio), col = "red")
+plot(borough_accident_ratio$geometry, add = TRUE)
+
+```
+
+The results for K nearest neighbour model is shown below. We have used `k = 4` as our definition, as it is the smallest number that has allowed all boroughs with shared edges are considered to be neighbouring.
+
+```{r kNN, warning=FALSE}
+
+# define 4 nearest neighbours
+knn_nb <- borough_accident_ratio %>%
+  st_centroid(.) %>%
+  st_geometry(.) %>%
+  knearneigh(., k = 4) %>%
+  knn2nb(.)
+
+plot(knn_nb, st_geometry(borough_accident_ratio), col = "red")
+plot(borough_accident_ratio$geometry, add = TRUE)
+
+```
+
+We must note that the in the Queen's case, the Thames is separating the north and south of London, which does not reflect the actual network of roads connected by bridges. 
+
+Therefore, we will use the 4 nearest neighbours as our definition of neighbouring. The row standardised spatial weight matrix is calculated as below.
+
+```{r matrix}
+
+knn_lw <- knn_nb %>%
+  nb2listw(., style = "W")
+
+```
+
+
+##### Global Moran's I
+
+The Global Moran's I is calculated as follows.
+
+```{r}
+
+global_i <- borough_accident_ratio %>%
+  st_drop_geometry() %>%
+  dplyr::select(ratio) %>%
+  pull() %>%
+  moran.test(., knn_lw) 
+
+global_i
+
+```
+
+The Global Moran's I value has a positive value, indicating that there is a clustering of similar values in the distribution of accidents. The null hypothesis of complete spatial randomness can be rejected, and we can now assume that there is a positive spatial autocorrelation for this value.
+
+##### Local Moran's I
+
+The local Moran's I is calculated to check where the clustering and dispersed values are distributed. The Local Moran's I is calculated below.
+
+```{r local_morans_i}
+
+# calculate moran's I
+local_i <- borough_accident_ratio %>%
+  st_drop_geometry() %>%
+  dplyr::select(ratio) %>%
+  pull() %>%
+  localmoran(., knn_lw) %>%
+  as_tibble(.)
+
+# join back to the dataset
+borough_moran <- borough_accident_ratio %>%
+  mutate(i_local = local_i$Ii) %>%
+  mutate(i_zscore = local_i$Z.Ii)
+
+```
+
+Once the Moran's I is calculated for all boroughs, the data is merged back to the original dataset. 
+Below, we have plotted the local Moran's I value for the accident-traffic ratio. 
+
+```{r plot_morans_i}
+
+# create breaks
+breaks <- c(-1000, -2.58, -1.96, -1.65, 1.65, 1.96, 2.58, 1000)
+
+# run ggplot
+ggplot() +
+  geom_sf(
+    data = borough_moran,
+    aes(fill = as.numeric(i_zscore)),
+    color = "white"
+  ) +
+  
+  # create scale
+  scale_fill_fermenter(
+    type = "div",
+    palette = "BrBG",
+    breaks = breaks,
+    labels = c("", -2.58, -1.96, -1.65, 1.65, 1.96, 2.58, ""),
+    name = "Z Score",
+    limits = c(-1000, 1000)
+  ) +
+  
+  # set labels
+  labs(
+    title = "Z-score of Local Moran's I for the accident-traffic ratio"
+  ) + 
+  
+  # add north arrow
+  annotation_north_arrow(
+    location = "tr",
+    style = north_arrow_fancy_orienteering(
+      text_col = NA
+    )
+  ) +
+  
+  # set theme
+  theme_minimal() +
+  
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank()    
+  )
+
+```
+
+This shows that the boroughs near the centre of London have higher rate of accidents compared to its neighbours. Interestingly, the western London areas of Hounslow and Wandworth also have significantly higher values compared to its surroundings. On the other hand, we can see the borough of Harrow being safer than its surroundings.
+
+## Results
+
+We have analysed the number of accidents that involved e-scooters by borough, standardised by the area and the average number of e-scooter traffic.
+We have found some clustering of relatively unsafe areas in the centre of London, and some in the western London area.
+
+## Discussion and Reflection
+
+The results indicate that some areas have a higher probability of accidents than others. This has successfully located areas that need further investigation, in order to make the London roads safer.
+
+Further analysis can be done in order to search other factors that can influence the number of accidents.
+
+- A spatial regression model can be applied to our linear regression model in order to distinguish the spatial aspect in addition to the traffic volume
+- An assessment on the physical structure of the road network can be conducted to determine points that may be dangerous.
+
+The limitations of this report is that the dataset is summarised in a fairly large area of a borough. This analysis has dropped the following information that might have been useful:
+
+- count of traffic differs by the class of road, whether there exist a cycle path, or the weather
+- the specific point of incidents are not taken into account, which have the potential to indicate dangerous points
+- road networks are the geometries that ultimately impact the distribution of incidents, but this is not taken into account.
+
+The wards or smaller administrative boundaries should be considered for a detailed analysis, in order to further identify the areas that have higher values of accidents. For this, we must investigate further into the active travel counts dataset, and find an appropriate way to interpolate values for areas without valid numbers.
+
+## References
+
+- Department for Transport. (2023). ‘Road Safety Data’. Available at: https://www.data.gov.uk/dataset/cb7ae6f0-4be6-4935-9277-47e5ce24a11f/road-safety-data (Accessed: 15 December 2023).
+- Transport for London. (2023). ‘Active Travel Counts’. Available at: https://cycling.data.tfl.gov.uk/ (Accessed: 15 December 2023).
+
